@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# License: GNU Affero General Public License Version 3 (GNU AGPLv3), (c) 2023, Marc Gilligan <marcg@ulfnic.com>
+[[ $DEBUG ]] && set -x
+set -o errexit
+
+
+help_doc() {
+	IFS= read -rd '' <<-'HelpDoc' || printf '%s' "${REPLY//'\	'/	}" 1>&2
+		fd2f EXECUTABLE [PARAMETER...]
+		fd2f sudo EXECUTABLE [PARAMETER...]
+
+		Executes a command after converting file descriptors in its PARAMETERs
+		into temporary regular files.
+
+		If a PARAMETER has a value of /dev/fd/* or /dev/self/fd/* its written
+		to a temporary file and the parameter is replaced with a path to that file.
+
+		If a file descriptor ends in an extension, its stripped from the path and
+		appended to the temporary file.
+
+		Files a written to a 0700 permissioned directory specified by environment
+		variables TMPDIR or XDG_RUNTIME_DIR in priority order, or /tmp as a
+		fallback if both are empty.
+
+		EXAMPLE PROCESS
+		       command: fd2f ocr-img -abc -f <(cat /dev/fd/0).png < take-screenshot
+		      executed: fd2f ocr-img -abc -f /dev/fd/43.png
+		   fd2f writes:                  cat /dev/fd/43 > "$temp_dir/2.png"
+		     fd2f runs:      ocr-img -abc -f "$temp_dir/2.png"
+		  fd2f removes:                rm -r "$temp_dir"
+
+		EXAMPLES OF USE
+		# Docker Compose
+		fd2f sudo docker-compose -f <(
+		\	cat <<-'EOF'
+		\		My Docker Compose YAML
+		\	EOF
+		).yml up
+
+		# NodeJS
+		printf '%s\n' 'pipe into nodejs' | fd2f node <(cat <<-'EOF'
+		\	process.stdin.setEncoding('utf8');
+		\	process.stdin.on('data', (data)=>{
+		\		process.stdout.write(data)
+		\	});
+		\	process.stderr.write('Reading stdin...\n')
+		EOF
+		).js
+
+	HelpDoc
+	[[ $1 ]] && exit "$1"
+}
+
+
+
+print_stderr() {
+	if [[ $1 == '0' ]]; then
+		[[ $2 ]] && printf "$2" "${@:3}" 1>&2 || :
+	else
+		[[ $2 ]] && printf '%s'"$2" "ERROR: ${0##*/}, " "${@:3}" 1>&2 || :
+		exit "$1"
+	fi
+}
+
+
+
+make-temp-dir() {
+	on_exit() {
+		[[ $tmp_dir_is_made ]] && [[ -d "$temp_dir" ]] && rm -r -- "$temp_dir"
+	}
+	trap on_exit EXIT
+
+	mkdir --mode 0700 -- "$temp_dir"
+	tmp_dir_is_made=1
+}
+
+
+
+replace-fd() {
+	# Define globals and locals
+	tmp_dir_is_made=
+	temp_dir=${TMPDIR:-${XDG_RUNTIME_DIR:-/tmp}}'/fd2f__'$USER'_'$$'_'${EPOCHREALTIME:-$(date +%s.%N)}
+	local i param
+
+
+	# Loop through params replacing file descriptors with regular files
+	for i in "${!fd2f__params[@]}"; do
+		[[ $i == 0 ]] && continue
+		param=${fd2f__params[i]}
+
+
+		# Ignore non-file descriptors
+		[[ $param != '/dev/fd/'* ]] && [[ $param != '/dev/self/fd/'* ]] && continue
+
+
+		# Extract the extension, and the path without the extension
+		fd_ext=${param#*.}
+		fd_path=${param%%.*}
+		[[ $fd_ext == $fd_path ]] && fd_ext= || fd_ext='.'$fd_ext
+
+
+		# Replace the parameter with the regular file path and write the file descriptor to it
+		[[ $tmp_dir_is_made ]] || make-temp-dir
+		fd2f__params[i]=$temp_dir'/'$i$fd_ext
+		cat "$fd_path" > "${fd2f__params[i]}" || print_stderr 1 '%s\n' 'failed to write '"$fd_path"' to temp file: '"${fd2f__params[i]}"
+
+	done
+}
+
+
+
+[[ $1 ]] || help_doc 1
+fd2f__params=("$@")
+
+
+
+# Convert file descriptors to regular files if parameters are present
+[[ ${#fd2f__params[@]} != '1' ]] && replace-fd
+
+
+
+# Execute command
+"${fd2f__params[@]}"
+exit $?
+
+
+
