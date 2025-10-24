@@ -42,10 +42,3 @@ printf '%s\n' 'pipe into nodejs' | fd2f node <(cat <<-'EOF'
 EOF
 ).js
 ```
-
-## License
-
-Licensed under AGPLv3. See LICENSE for details.
-
-
-
